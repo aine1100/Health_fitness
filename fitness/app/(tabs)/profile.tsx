@@ -6,15 +6,25 @@ import { useEffect, useState } from "react";
 import UserCard from "../components/user-card";
 import { io } from "socket.io-client";
 
-// Backend API URL (adjust if hosted elsewhere)
-const API_URL = "http://localhost:3000/api/sensor";
+// Backend API URL (adjust for production or testing)
+const API_URL = "http://localhost:3000/api/sensor"; // Use ngrok or public IP for device testing
 
 export default function ProfileScreen() {
-  // State to store sensor data
+  // State to store full Hub900 sensor data
   const [sensorData, setSensorData] = useState({
+    deviceId: null,
+    deviceType: null,
     heartRate: null,
-    cadence: null,
-    speed: null,
+    boxingHand: null,
+    boxingPunchType: null,
+    boxingPower: null,
+    boxingSpeed: null,
+    cadenceWheel: null,
+    sosAlert: false,
+    battery: null,
+    steps: null,
+    calories: null,
+    temperature: null,
     oxygen: null,
     lastUpdated: null,
   });
@@ -33,12 +43,17 @@ export default function ProfileScreen() {
     fetchSensorData();
   }, []);
 
-  // Optional: Real-time updates with Socket.IO
- 
+  // Real-time updates with Socket.IO
   useEffect(() => {
     const socket = io("http://localhost:3000");
+    socket.on("connect", () => {
+      console.log("Connected to Socket.IO");
+    });
     socket.on("sensorData", (data) => {
       setSensorData(data);
+    });
+    socket.on("disconnect", () => {
+      console.log("Disconnected from Socket.IO");
     });
 
     return () => {
@@ -46,13 +61,12 @@ export default function ProfileScreen() {
     };
   }, []);
 
-
   // Derive metrics for UserCard
   const userMetrics = {
     name: "John Doe", // Replace with dynamic user data if available
-    average: sensorData.heartRate || 97, // Use heart rate as average
-    calories: sensorData.speed ? Math.round(sensorData.speed * 10) : 150, // Estimate calories from speed
-    points: sensorData.oxygen || 100, // Use oxygen as points
+    average: sensorData.heartRate || 97, // Heart rate as average
+    calories: sensorData.calories || (sensorData.steps ? Math.round(sensorData.steps * 0.04) : 150), // Estimate from steps
+    points: sensorData.oxygen || 100, // Oxygen as points
   };
 
   return (
@@ -64,13 +78,14 @@ export default function ProfileScreen() {
         <Text style={styles.headerTitle}>Group Info</Text>
         <View style={styles.profileIcon}>
           <Image
-            source={{ uri: "https://via.placeholder.com/28" }} // Placeholder profile image
+            source={{ uri: "https://via.placeholder.com/28" }} // Replace with user profile image
             style={{ width: 28, height: 28, borderRadius: 14 }}
           />
         </View>
       </View>
 
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+        {/* Display multiple users or groups */}
         <UserCard {...userMetrics} />
         <UserCard {...userMetrics} />
         <UserCard {...userMetrics} />
