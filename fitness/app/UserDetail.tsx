@@ -89,16 +89,23 @@ export default function UserDetailScreen() {
     };
   }, []);
 
-  // Derive metrics for MetricCard
-  const metrics = {
-    points: sensorData.oxygen || 100, // Oxygen as points
-    calories: sensorData.calories || (sensorData.steps ? Math.round(sensorData.steps * 0.04) : 900), // Calories from steps
-    heartRate: sensorData.heartRate || 155, // Heart rate
-    average: sensorData.boxingPower ? Math.round(sensorData.boxingPower * 0.1) : 90, // Average from boxing power
+  // Check if sensorData is empty
+  const isDataEmpty = () => {
+    return Object.values(sensorData).every(
+      (value) => value === null || value === false || value === ""
+    );
   };
 
-  // Sample historical data for chart (replace with backend data if available)
-  const chartData = [50, 60, 70, metrics.heartRate || 155, 80, 90, 100]; // Use heart rate for trend
+  // Derive metrics for MetricCard (no fallbacks)
+  const metrics = {
+    points: sensorData.oxygen,
+    calories: sensorData.calories,
+    heartRate: sensorData.heartRate,
+    average: sensorData.boxingPower ? Math.round(sensorData.boxingPower * 0.1) : null,
+  };
+
+  // Chart data (single heartRate value or empty)
+  const chartData = sensorData.heartRate ? [sensorData.heartRate] : [];
 
   return (
     <SafeAreaView style={styles.container}>
@@ -116,131 +123,157 @@ export default function UserDetailScreen() {
       </View>
 
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
-        <Text style={styles.dateLabel}>JULY-DEC</Text>
-        <Text style={styles.dateValue}>July 15, 2023</Text>
-
-        {sensorData.sosAlert && (
-          <View style={styles.sosBadge}>
-            <Text style={styles.sosText}>SOS Alert!</Text>
+        {isDataEmpty() ? (
+          <View style={styles.dataContainer}>
+            <Text style={styles.dataText}>No data found</Text>
           </View>
-        )}
+        ) : (
+          <>
+            <Text style={styles.dateLabel}>JULY-DEC</Text>
+            <Text style={styles.dateValue}>July 15, 2023</Text>
 
-        <View style={styles.timeSlots}>
-          <View style={styles.timeSlot}>
-            <Text style={styles.timeText}>10:00</Text>
-          </View>
-          <View style={[styles.timeSlot, styles.activeTimeSlot]}>
-            <Text style={styles.activeTimeText}>12:00</Text>
-          </View>
-          <View style={styles.timeSlot}>
-            <Text style={styles.timeText}>15:00</Text>
-          </View>
-        </View>
-
-        <View style={styles.metricsGrid}>
-          <MetricCard
-            title="Points"
-            value={metrics.points.toString()} // Convert number to string
-            color="#1DB954"
-            icon="trophy"
-            chartType="line"
-          />
-          <MetricCard
-            title="Calories"
-            value={metrics.calories.toString()} // Convert number to string
-            unit="kcal"
-            color="#4A9DFF"
-            icon="flame"
-            chartType="bar"
-          />
-          <MetricCard
-            title="Heart Rate"
-            value={metrics.heartRate.toString()} // Convert number to string
-            unit="bpm"
-            color="#FF4A55"
-            icon="heart"
-            chartType="line"
-            lineStyle="heartbeat"
-          />
-          <MetricCard
-            title="Average"
-            value={metrics.average.toString()} // Convert number to string
-            unit="Percent"
-            color="#FFA94A"
-            icon="stats-chart"
-            chartType="bar"
-          />
-        </View>
-
-        <View style={styles.overviewSection}>
-          <Text style={styles.overviewTitle}>Recent Overview</Text>
-
-          <View style={styles.tabsContainer}>
-            <TouchableOpacity
-              style={[styles.tab, activeTab === "thisWeek" && styles.activeTab]}
-              onPress={() => setActiveTab("thisWeek")}
-            >
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === "thisWeek" && styles.activeTabText,
-                ]}
-              >
-                This Week
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.tab, activeTab === "lastWeek" && styles.activeTab]}
-              onPress={() => setActiveTab("lastWeek")}
-            >
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === "lastWeek" && styles.activeTabText,
-                ]}
-              >
-                Last Week
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.tab, activeTab === "thisMonth" && styles.activeTab]}
-              onPress={() => setActiveTab("thisMonth")}
-            >
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === "thisMonth" && styles.activeTabText,
-                ]}
-              >
-                This Month
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.chartContainer}>
-            <CustomLineChart data={chartData} />
-
-            <View style={styles.totalPointsContainer}>
-              <Text style={styles.totalPointsValue}>{metrics.points * 7}</Text>
-              <View style={styles.pointsChangeBadge}>
-                <Text style={styles.pointsChangeText}>+10%</Text>
+            {sensorData.sosAlert && (
+              <View style={styles.sosBadge}>
+                <Text style={styles.sosText}>SOS Alert!</Text>
               </View>
-              <Text style={styles.totalPointsLabel}>POINTS</Text>
-            </View>
-          </View>
+            )}
 
-          <View style={styles.bottomMetrics}>
-            <View style={styles.metricItem}>
-              <Text style={styles.metricValue}>{metrics.heartRate}</Text>
+            <View style={styles.timeSlots}>
+              <View style={styles.timeSlot}>
+                <Text style={styles.timeText}>10:00</Text>
+              </View>
+              <View style={[styles.timeSlot, styles.activeTimeSlot]}>
+                <Text style={styles.activeTimeText}>12:00</Text>
+              </View>
+              <View style={styles.timeSlot}>
+                <Text style={styles.timeText}>15:00</Text>
+              </View>
             </View>
-            <View style={styles.metricItem}>
-              <Text style={styles.metricValue}>{metrics.calories}</Text>
+
+            <View style={styles.metricsGrid}>
+              {metrics.points !== null && (
+                <MetricCard
+                  title="Points"
+                  value={metrics.points.toString()}
+                  color="#1DB954"
+                  icon="trophy"
+                  chartType="line"
+                />
+              )}
+              {metrics.calories !== null && (
+                <MetricCard
+                  title="Calories"
+                  value={metrics.calories.toString()}
+                  unit="kcal"
+                  color="#4A9DFF"
+                  icon="flame"
+                  chartType="bar"
+                />
+              )}
+              {metrics.heartRate !== null && (
+                <MetricCard
+                  title="Heart Rate"
+                  value={metrics.heartRate.toString()}
+                  unit="bpm"
+                  color="#FF4A55"
+                  icon="heart"
+                  chartType="line"
+                  lineStyle="heartbeat"
+                />
+              )}
+              {metrics.average !== null && (
+                <MetricCard
+                  title="Average"
+                  value={metrics.average.toString()}
+                  unit="Percent"
+                  color="#FFA94A"
+                  icon="stats-chart"
+                  chartType="bar"
+                />
+              )}
             </View>
-            <View style={styles.metricItem}>
-              <Text style={styles.metricValue}>{metrics.average}</Text>
+
+            <View style={styles.overviewSection}>
+              <Text style={styles.overviewTitle}>Recent Overview</Text>
+
+              <View style={styles.tabsContainer}>
+                <TouchableOpacity
+                  style={[styles.tab, activeTab === "thisWeek" && styles.activeTab]}
+                  onPress={() => setActiveTab("thisWeek")}
+                >
+                  <Text
+                    style={[
+                      styles.tabText,
+                      activeTab === "thisWeek" && styles.activeTabText,
+                    ]}
+                  >
+                    This Week
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.tab, activeTab === "lastWeek" && styles.activeTab]}
+                  onPress={() => setActiveTab("lastWeek")}
+                >
+                  <Text
+                    style={[
+                      styles.tabText,
+                      activeTab === "lastWeek" && styles.activeTabText,
+                    ]}
+                  >
+                    Last Week
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.tab, activeTab === "thisMonth" && styles.activeTab]}
+                  onPress={() => setActiveTab("thisMonth")}
+                >
+                  <Text
+                    style={[
+                      styles.tabText,
+                      activeTab === "thisMonth" && styles.activeTabText,
+                    ]}
+                  >
+                    This Month
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {chartData.length > 0 && (
+                <View style={styles.chartContainer}>
+                  <CustomLineChart data={chartData} />
+
+                  <View style={styles.totalPointsContainer}>
+                    <Text style={styles.totalPointsValue}>
+                      {metrics.points ? metrics.points * 7 : 0}
+                    </Text>
+                    <View style={styles.pointsChangeBadge}>
+                      <Text style={styles.pointsChangeText}>+10%</Text>
+                    </View>
+                    <Text style={styles.totalPointsLabel}>POINTS</Text>
+                  </View>
+                </View>
+              )}
+
+              <View style={styles.bottomMetrics}>
+                <View style={styles.metricItem}>
+                  <Text style={styles.metricValue}>
+                    {metrics.heartRate ?? "N/A"}
+                  </Text>
+                </View>
+                <View style={styles.metricItem}>
+                  <Text style={styles.metricValue}>
+                    {metrics.calories ?? "N/A"}
+                  </Text>
+                </View>
+                <View style={styles.metricItem}>
+                  <Text style={styles.metricValue}>
+                    {metrics.average ?? "N/A"}
+                  </Text>
+                </View>
+              </View>
             </View>
-          </View>
-        </View>
+          </>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -251,7 +284,7 @@ interface CustomLineChartProps {
 }
 
 function CustomLineChart({ data }: CustomLineChartProps) {
-  const maxValue = Math.max(...data);
+  const maxValue = Math.max(...data, 1); // Avoid division by zero
 
   return (
     <View style={styles.lineChartContainer}>
@@ -267,7 +300,7 @@ function CustomLineChart({ data }: CustomLineChartProps) {
                 },
               ]}
             />
-            {index === 3 && (
+            {index === Math.floor(data.length / 2) && (
               <View style={styles.lineChartDot}>
                 <View style={styles.lineChartInnerDot} />
               </View>
@@ -308,6 +341,18 @@ const styles = StyleSheet.create({
   scrollView: {
     flex: 1,
     paddingHorizontal: 16,
+  },
+  dataContainer: {
+    marginTop: 20,
+    backgroundColor: "#1E1E1E",
+    padding: 15,
+    borderRadius: 8,
+    width: "100%",
+  },
+  dataText: {
+    color: "white",
+    fontSize: 16,
+    marginVertical: 5,
   },
   dateLabel: {
     color: "#888",

@@ -61,12 +61,11 @@ export default function ProfileScreen() {
     };
   }, []);
 
-  // Derive metrics for UserCard
-  const userMetrics = {
-    name: "John Doe", // Replace with dynamic user data if available
-    average: sensorData.heartRate || 97, // Heart rate as average
-    calories: sensorData.calories || (sensorData.steps ? Math.round(sensorData.steps * 0.04) : 150), // Estimate from steps
-    points: sensorData.oxygen || 100, // Oxygen as points
+  // Check if sensorData is empty
+  const isDataEmpty = () => {
+    return Object.values(sensorData).every(
+      (value) => value === null || value === false || value === ""
+    );
   };
 
   return (
@@ -85,11 +84,18 @@ export default function ProfileScreen() {
       </View>
 
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
-        {/* Display multiple users or groups */}
-        <UserCard {...userMetrics} />
-        <UserCard {...userMetrics} />
-        <UserCard {...userMetrics} />
-        <UserCard {...userMetrics} />
+        {isDataEmpty() ? (
+          <View style={styles.dataContainer}>
+            <Text style={styles.dataText}>No data found</Text>
+          </View>
+        ) : (
+          <>
+            <UserCard sensorData={sensorData} />
+            <UserCard sensorData={sensorData} />
+            <UserCard sensorData={sensorData} />
+            <UserCard sensorData={sensorData} />
+          </>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -124,5 +130,17 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 16,
     marginBottom: 120,
+  },
+  dataContainer: {
+    marginTop: 20,
+    backgroundColor: "#1E1E1E",
+    padding: 15,
+    borderRadius: 8,
+    width: "100%",
+  },
+  dataText: {
+    color: "white",
+    fontSize: 16,
+    marginVertical: 5,
   },
 });

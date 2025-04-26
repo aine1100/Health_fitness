@@ -12,14 +12,18 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useState, useEffect } from "react";
 import { BleManager, Device, Service, Characteristic } from "react-native-ble-plx";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import Icon from "react-native-vector-icons/MaterialCommunityIcons";
 import Modal from "react-native-modal";
 import axios from "axios";
 
-// Backend API URL (use ngrok for device testing)
-const API_URL = "http://localhost:3000/api/sensor/ble";
+// Backend API URL (replace with your ngrok or deployed URL)
+const API_URL = "https://your-ngrok-id.ngrok.io/api/sensor/ble";
 
-interface Hub900Data {
+// AsyncStorage key for last connected device
+const LAST_DEVICE_KEY = "lastConnectedDevice";
+
+interface SensorData {
   heartRate: number | null;
   boxingHand: string | null;
   boxingPunchType: string | null;
@@ -52,7 +56,8 @@ export default function HomeScreen() {
   const [modalVisible, setModalVisible] = useState(false);
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
   const [connecting, setConnecting] = useState(false);
-  const [data, setData] = useState<Hub900Data>({
+  const [autoConnecting, setAutoConnecting] = useState(false);
+  const [data, setData] = useState<SensorData>({
     heartRate: null,
     boxingHand: null,
     boxingPunchType: null,
@@ -68,7 +73,7 @@ export default function HomeScreen() {
     lastUpdated: null,
   });
 
-  // Check Bluetooth status
+  // Check Bluetooth status and attempt auto-connection
   useEffect(() => {
     if (!bleManager) {
       console.error("BleManager is not initialized");
@@ -81,8 +86,9 @@ export default function HomeScreen() {
         const state = await bleManager!.state();
         console.log("Bluetooth state:", state);
         setIsBluetoothEnabled(state === "PoweredOn");
-        if (state !== "PoweredOn") {
-          Alert.alert("Bluetooth Disabled", "Please enable Bluetooth in your device settings.");
+        if (state === "PoweredOn" && !connectedDevice && !autoConnecting) {
+          console.log("Bluetooth enabled, attempting auto-connection...");
+          autoConnectToDevice();
         }
       } catch (error) {
         console.error("Bluetooth status check error:", error);
@@ -95,8 +101,11 @@ export default function HomeScreen() {
     const subscription = bleManager!.onStateChange((state) => {
       console.log("Bluetooth state changed:", state);
       setIsBluetoothEnabled(state === "PoweredOn");
-      if (state !== "PoweredOn") {
-        Alert.alert("Bluetooth Disabled", "Bluetooth was turned off. Please enable it to continue.");
+      if (state === "PoweredOn" && !connectedDevice && !autoConnecting) {
+        console.log("Bluetooth turned on, attempting auto-connection...");
+        autoConnectToDevice();
+      } else if (state !== "PoweredOn") {
+        Alert.alert("Bluetooth Disabled", "Please enable Bluetooth in your device settings.");
       }
     }, true);
 
@@ -105,30 +114,26 @@ export default function HomeScreen() {
       bleManager!.destroy();
       console.log("BleManager destroyed");
     };
-  }, []);
+  }, [connectedDevice, autoConnecting]);
 
   // Request Bluetooth permissions for Android
   const requestBluetoothPermissions = async () => {
     if (Platform.OS === "android") {
       try {
-        const permissions = Platform.Version >= 31
-          ? [
-              PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-              PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-              PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-            ]
-          : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
+        const permissions =
+          Platform.Version >= 31
+            ? [
+                PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+                PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+                PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+              ]
+            : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
 
         const granted = await PermissionsAndroid.requestMultiple(permissions);
-        const allGranted = permissions.every(
-          (perm) => granted[perm] === PermissionsAndroid.RESULTS.GRANTED
-        );
+        const allGranted = permissions.every((perm) => granted[perm] === PermissionsAndroid.RESULTS.GRANTED);
         console.log("Permissions granted:", allGranted, granted);
         if (!allGranted) {
-          Alert.alert(
-            "Permission Denied",
-            "Bluetooth and location permissions are required to scan for devices."
-          );
+          Alert.alert("Permission Denied", "Bluetooth and location permissions are required to connect to devices.");
         }
         return allGranted;
       } catch (error) {
@@ -140,10 +145,93 @@ export default function HomeScreen() {
     return true;
   };
 
-  // Scan for BLE devices
+  // Auto-connect to a previously connected or discoverable device
+  const autoConnectToDevice = async () => {
+    if (connectedDevice || autoConnecting || scanning) {
+      console.log("Auto-connection skipped: already connected or in progress");
+      return;
+    }
+
+    try {
+      setAutoConnecting(true);
+      setModalVisible(true);
+      console.log("Starting auto-connection scan...");
+
+      if (!bleManager) {
+        throw new Error("BleManager not initialized");
+      }
+
+      const hasPermissions = await requestBluetoothPermissions();
+      if (!hasPermissions) {
+        console.log("Auto-connection failed: permissions not granted");
+        throw new Error("Bluetooth permissions not granted");
+      }
+
+      const state = await bleManager.state();
+      console.log("Current Bluetooth state:", state);
+      if (state !== "PoweredOn") {
+        console.log("Auto-connection failed: Bluetooth not enabled");
+        throw new Error("Bluetooth is not enabled");
+      }
+
+      // Get last connected device ID
+      const lastDeviceId = await AsyncStorage.getItem(LAST_DEVICE_KEY);
+      console.log("Last connected device ID:", lastDeviceId);
+
+      let foundDevice: Device | null = null;
+      const discoveredDevices = new Map<string, Device>();
+
+      bleManager.startDeviceScan(null, null, (error, device) => {
+        if (error) {
+          console.error("Auto-connection scan error:", error);
+          setAutoConnecting(false);
+          setModalVisible(false);
+          Alert.alert("Connection Error", `Failed to scan: ${error.message}`);
+          return;
+        }
+
+        if (device && device.name) {
+          console.log("Discovered device:", {
+            id: device.id,
+            name: device.name,
+            rssi: device.rssi,
+          });
+          discoveredDevices.set(device.id, device);
+
+          // Prioritize last connected device or take first named device
+          if (!foundDevice && (device.id === lastDeviceId || !lastDeviceId)) {
+            foundDevice = device;
+            bleManager!.stopDeviceScan();
+            connectToDevice(device);
+          }
+        }
+      });
+
+      setTimeout(() => {
+        bleManager!.stopDeviceScan();
+        setAutoConnecting(false);
+        setModalVisible(false);
+        if (!foundDevice) {
+          console.log("Auto-connection failed: no devices found");
+          setDevices(Array.from(discoveredDevices.values()));
+          Alert.alert(
+            "No Devices Found",
+            "Could not find a paired device. Ensure it is in range and discoverable, then try scanning manually."
+          );
+        }
+      }, 5000);
+    } catch (error) {
+      console.error("Auto-connection error:", error);
+      Alert.alert("Error", `Failed to auto-connect: ${(error as Error).message}`);
+      setAutoConnecting(false);
+      setModalVisible(false);
+    }
+  };
+
+  // Manual scan for BLE devices
   const scanForDevices = async () => {
     try {
-      console.log("Starting BLE scan...");
+      console.log("Starting manual BLE scan...");
       setScanning(true);
       setModalVisible(true);
       setDevices([]);
@@ -155,14 +243,14 @@ export default function HomeScreen() {
 
       const hasPermissions = await requestBluetoothPermissions();
       if (!hasPermissions) {
-        console.log("Permissions not granted");
+        console.log("Manual scan failed: permissions not granted");
         throw new Error("Bluetooth permissions not granted");
       }
 
       const state = await bleManager.state();
       console.log("Current Bluetooth state:", state);
       if (state !== "PoweredOn") {
-        console.log("Bluetooth is not enabled");
+        console.log("Manual scan failed: Bluetooth not enabled");
         throw new Error("Bluetooth is not enabled");
       }
 
@@ -171,7 +259,7 @@ export default function HomeScreen() {
       const discoveredDevices = new Map<string, Device>();
       bleManager.startDeviceScan(null, null, (error, device) => {
         if (error) {
-          console.error("Scan error:", error);
+          console.error("Manual scan error:", error);
           setScanning(false);
           setModalVisible(false);
           Alert.alert("Scan Error", `Failed to scan: ${error.message}`);
@@ -191,7 +279,7 @@ export default function HomeScreen() {
       });
 
       setTimeout(() => {
-        console.log("Stopping BLE scan");
+        console.log("Stopping manual BLE scan");
         bleManager!.stopDeviceScan();
         setScanning(false);
         setModalVisible(false);
@@ -200,7 +288,7 @@ export default function HomeScreen() {
         }
       }, 10000);
     } catch (error) {
-      console.error("Bluetooth scan error:", error);
+      console.error("Manual scan error:", error);
       Alert.alert("Error", `Failed to scan for devices: ${(error as Error).message}`);
       setScanning(false);
       setModalVisible(false);
@@ -222,6 +310,10 @@ export default function HomeScreen() {
       const connectedDevice = await device.connect();
       await connectedDevice.discoverAllServicesAndCharacteristics();
       setConnectedDevice(connectedDevice);
+
+      // Store device ID in AsyncStorage
+      await AsyncStorage.setItem(LAST_DEVICE_KEY, device.id);
+      console.log("Stored device ID:", device.id);
 
       console.log("Connected to device:", connectedDevice.name);
 
@@ -292,34 +384,21 @@ export default function HomeScreen() {
       setConnectedDevice(null);
     } finally {
       setConnecting(false);
+      setAutoConnecting(false);
       setModalVisible(false);
     }
   };
 
-  // Parse characteristic data (dynamic based on UUID)
+  // Parse characteristic data (log raw data for Hub900 customization)
   const parseCharacteristicData = (serviceUUID: string, charUUID: string, characteristic: Characteristic) => {
     const rawData = Buffer.from(characteristic.value!, "base64");
-    const parsed: Partial<Hub900Data> = {};
-
-    // Example parsing for standard services (customize for Hub900)
-    if (serviceUUID === "0000180D-0000-1000-8000-00805F9B34FB" && charUUID === "00002A37-0000-1000-8000-00805F9B34FB") {
-      // Heart Rate Service
-      parsed.heartRate = rawData.readUInt8(1);
-    } else if (serviceUUID === "0000180F-0000-1000-8000-00805F9B34FB" && charUUID === "00002A19-0000-1000-8000-00805F9B34FB") {
-      // Battery Service
-      parsed.battery = rawData.readUInt8(0);
-    } else {
-      // Log unknown data for Hub900 customization
-      console.log(`Unknown characteristic ${charUUID} data:`, rawData);
-      // Placeholder parsing (replace with Hub900 logic)
-      parsed.heartRate = rawData.readUInt8(0) || null;
-    }
-
-    return parsed;
+    console.log(`Characteristic ${charUUID} data for service ${serviceUUID}:`, rawData);
+    // Return empty object; customize parsing for Hub900 when SDK details are available
+    return {};
   };
 
   // Send data to backend
-  const sendToBackend = async (data: Partial<Hub900Data> & { deviceId: string; deviceType: string }) => {
+  const sendToBackend = async (data: Partial<SensorData> & { deviceId: string; deviceType: string }) => {
     try {
       await axios.post(API_URL, {
         ...data,
@@ -364,7 +443,7 @@ export default function HomeScreen() {
     <TouchableOpacity
       style={styles.deviceItem}
       onPress={() => connectToDevice(item)}
-      disabled={connecting || connectedDevice !== null}
+      disabled={connecting || autoConnecting || connectedDevice !== null}
     >
       <Text style={styles.deviceName}>{item.name || "Unknown Device"}</Text>
       <Text style={styles.deviceAddress}>{item.id}</Text>
@@ -402,16 +481,21 @@ export default function HomeScreen() {
             </View>
           </View>
         ) : (
-          <TouchableOpacity
-            style={[styles.button, (scanning || connecting) && styles.buttonDisabled]}
-            onPress={scanForDevices}
-            disabled={scanning || connecting}
-          >
-            <Icon name="bluetooth" size={24} color="white" style={styles.buttonIcon} />
-            <Text style={styles.buttonText}>
-              {scanning ? "Scanning..." : connecting ? "Connecting..." : "Scan for Bluetooth Devices"}
+          <View>
+            <Text style={styles.statusText}>
+              {autoConnecting ? "Connecting to paired device..." : "No device connected"}
             </Text>
-          </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.button, (scanning || connecting || autoConnecting) && styles.buttonDisabled]}
+              onPress={scanForDevices}
+              disabled={scanning || connecting || autoConnecting}
+            >
+              <Icon name="bluetooth" size={24} color="white" style={styles.buttonIcon} />
+              <Text style={styles.buttonText}>
+                {scanning ? "Scanning..." : connecting || autoConnecting ? "Connecting..." : "Scan for Bluetooth Devices"}
+              </Text>
+            </TouchableOpacity>
+          </View>
         )}
 
         {devices.length > 0 && !connectedDevice && (
@@ -456,6 +540,12 @@ const styles = StyleSheet.create({
     color: "#BBBBBB",
     textAlign: "center",
     marginBottom: 20,
+  },
+  statusText: {
+    fontSize: 16,
+    color: "#BBBBBB",
+    textAlign: "center",
+    marginBottom: 10,
   },
   button: {
     flexDirection: "row",

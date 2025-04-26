@@ -8,14 +8,13 @@ const SockJS = require('sockjs-client');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
-const PORT = 3000;
-
+const PORT = 4000;
 // Configure PostgreSQL connection
 const pool = new Pool({
   user: 'postgres',
   host: 'localhost',
   database: 'fitness',
-  password: 'root',
+  password: 'aine',
   port: 5432,
 });
 
@@ -46,7 +45,7 @@ app.get('/api/sensor', (req, res) => {
 });
 
 // Connect to Java microservice WebSocket
-const socket = new SockJS('http://localhost:8080/ws');
+const socket = new SockJS('http://localhost:9000');
 const stompClient = new Client({
   webSocketFactory: () => socket,
   reconnectDelay: 5000, // Auto-reconnect every 5 seconds if disconnected
