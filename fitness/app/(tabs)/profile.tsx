@@ -7,7 +7,7 @@ import UserCard from "../components/user-card";
 import { io } from "socket.io-client";
 
 // Backend API URL (adjust for production or testing)
-const API_URL = "http://localhost:3000/api/sensor"; // Use ngrok or public IP for device testing
+const API_URL = ""; // Use ngrok or public IP for device testing
 
 export default function ProfileScreen() {
   // State to store full Hub900 sensor data
