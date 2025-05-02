@@ -18,7 +18,7 @@ import Modal from "react-native-modal";
 import axios from "axios";
 
 // Backend API URL (replace with your ngrok or deployed URL)
-const API_URL = "https://your-ngrok-id.ngrok.io/api/sensor/ble";
+const API_URL = "https://tcp-backend-latest.onrender.com/api/sensor/ble";
 
 // AsyncStorage key for last connected device
 const LAST_DEVICE_KEY = "lastConnectedDevice";
