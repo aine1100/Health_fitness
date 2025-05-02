@@ -7,7 +7,7 @@ import UserCard from "../components/user-card";
 import { io } from "socket.io-client";
 
 // Backend API URL (adjust for production or testing)
-const API_URL = "https://tcp-backend-latest.onrender.com/api/sensor"; // Use ngrok or public IP for device testing
+const API_URL = "https://node-serverv-1-0-1.onrender.com/api/sensor"; // Use ngrok or public IP for device testing
 
 export default function ProfileScreen() {
   // State to store full Hub900 sensor data

@@ -17,7 +17,7 @@ import { io } from "socket.io-client";
 const screenWidth = Dimensions.get("window").width;
 
 // Backend API URL (use ngrok or public IP for device testing)
-const API_URL = "http://localhost:3000/api/sensor";
+const API_URL = "https://node-serverv-1-0-1.onrender.com/api/sensor";
 
 interface SensorData {
   deviceId: number | null;
@@ -73,7 +73,7 @@ export default function UserDetailScreen() {
 
   // Real-time updates with Socket.IO
   useEffect(() => {
-    const socket = io("http://localhost:3000");
+    const socket = io("https://node-serverv-1-0-1.onrender.com/");
     socket.on("connect", () => {
       console.log("Connected to Socket.IO");
     });
