@@ -111,8 +111,8 @@ export default function HomeScreen() {
 
     return () => {
       subscription.remove();
-      bleManager!.destroy();
-      console.log("BleManager destroyed");
+      
+      console.log("BleManager Cleanup");
     };
   }, [connectedDevice, autoConnecting]);
 
