@@ -1,214 +1,245 @@
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
-const { Pool } = require('pg');
-const { Client } = require('@stomp/stompjs');
-const SockJS = require('sockjs-client');
+const WebSocket = require('ws');
+const cors = require('cors');
 
-// Initialize Express
+const path = require('path');
+const { Pool } = require('pg');
+
+
+
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const wss = new WebSocket.Server({ server });
 
-
-// Configure PostgreSQL connection
+// Database configuration
 const pool = new Pool({
   connectionString: 'postgresql://stoneproofdb_user:ijOfAUPNMogj7YCsFpmcnqUgkHgG7FXG@dpg-d009jevgi27c73b2a7vg-a.oregon-postgres.render.com/stoneproofdb',
-  ssl: { rejectUnauthorized: false }, // important for Render.com
+  ssl: { rejectUnauthorized: false },
 });
 
-// Sensor data object
-let sensorData = {
-  deviceId: null,
-  deviceType: null,
-  heartRate: null,
-  boxingHand: null,
-  boxingPunchType: null,
-  boxingPower: null,
-  boxingSpeed: null,
-  cadenceWheel: null,
-  sosAlert: false,
-  battery: null,
-  steps: null,
-  calories: null,
-  temperature: null,
-  oxygen: null,
-  lastUpdated: null,
-};
-
+// Middleware
+app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, '../public')));
 
-// REST API to fetch latest sensor data
-app.get('/api/sensor', (req, res) => {
-  res.json(sensorData);
-});
+// Store connected clients and devices
+const clients = new Set();
+const devices = new Map();
 
-// Function to initialize DB and create table if not exists
+// Initialize database tables
 async function initializeDatabase() {
   try {
-    const createTableQuery = `
-      CREATE TABLE IF NOT EXISTS sensor_data (
+    // Create devices table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS devices (
         id SERIAL PRIMARY KEY,
-        device_id TEXT,
+        device_id TEXT UNIQUE,
         device_type TEXT,
+        name TEXT,
+        connected BOOLEAN DEFAULT false,
+        last_seen TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create device_data table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS device_data (
+        id SERIAL PRIMARY KEY,
+        device_id TEXT REFERENCES devices(device_id),
         heart_rate INTEGER,
-        boxing_hand TEXT,
-        boxing_punch_type TEXT,
-        boxing_power INTEGER,
-        boxing_speed INTEGER,
-        cadence_wheel INTEGER,
-        sos_alert BOOLEAN,
+        cadence INTEGER,
+        power INTEGER,
+        speed FLOAT,
+        jumps INTEGER,
         battery INTEGER,
-        steps INTEGER,
-        calories INTEGER,
-        temperature FLOAT,
-        oxygen FLOAT,
-        last_updated TIMESTAMP
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
-    `;
-    await pool.query(createTableQuery);
-    console.log("✅ sensor_data table is ready.");
-  } catch (err) {
-    console.error("❌ Error creating sensor_data table:", err);
+    `);
+
+    console.log('Database tables initialized successfully');
+  } catch (error) {
+    console.error('Error initializing database:', error);
   }
 }
 
-// Function to save sensorData into database
-async function saveToDatabase() {
-  try {
-    const query = `
-      INSERT INTO sensor_data (
-        device_id, device_type, heart_rate, boxing_hand, boxing_punch_type,
-        boxing_power, boxing_speed, cadence_wheel, sos_alert, battery,
-        steps, calories, temperature, oxygen, last_updated
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-    `;
-    const values = [
-      sensorData.deviceId,
-      sensorData.deviceType,
-      sensorData.heartRate,
-      sensorData.boxingHand,
-      sensorData.boxingPunchType,
-      sensorData.boxingPower,
-      sensorData.boxingSpeed,
-      sensorData.cadenceWheel,
-      sensorData.sosAlert,
-      sensorData.battery,
-      sensorData.steps,
-      sensorData.calories,
-      sensorData.temperature,
-      sensorData.oxygen,
-      sensorData.lastUpdated,
-    ];
-    await pool.query(query, values);
-  } catch (err) {
-    console.error('❌ Error saving data to PostgreSQL:', err);
-  }
-}
+// WebSocket connection handler
+wss.on('connection', (ws) => {
+  clients.add(ws);
+  console.log('New client connected');
 
-// Function to update sensorData based on type
-function updateSensorData(type, data) {
-  sensorData.lastUpdated = new Date();
-  sensorData.deviceType = type;
+  // Send current devices to new client
+  ws.send(JSON.stringify({
+    type: 'devices',
+    data: Array.from(devices.values())
+  }));
 
-  if (type === 'antHeartRate' || type === 'bleHeartRate' || type === 'bleBoxingHeartRate') {
-    sensorData.heartRate = data.heartRate;
-    sensorData.battery = data.battery;
-    sensorData.deviceId = data.deviceId;
-    if (type === 'bleHeartRate' || type === 'bleBoxingHeartRate') {
-      sensorData.steps = data.steps || null;
-      sensorData.calories = data.calories || null;
-      sensorData.temperature = data.temperature || null;
-      sensorData.oxygen = data.oxygen || null;
+  ws.on('message', async (message) => {
+    try {
+      const data = JSON.parse(message);
+      await handleWebSocketMessage(ws, data);
+    } catch (error) {
+      console.error('Error handling message:', error);
     }
-  } else if (type === 'bleBoxing') {
-    sensorData.boxingHand = data.hand === 0 ? 'Left' : 'Right';
-    sensorData.boxingPunchType = getPunchType(data.hand);
-    sensorData.boxingPower = data.power;
-    sensorData.boxingSpeed = data.speed;
-    sensorData.battery = data.battery;
-    sensorData.deviceId = data.deviceId;
-  } else if (type === 'bleCadence') {
-    sensorData.cadenceWheel = data.wheel;
-  } else if (type === 'bleSOS') {
-    sensorData.sosAlert = true;
-    sensorData.deviceId = data.deviceId;
-  } else if (type === 'idle') {
-    sensorData = { ...sensorData, lastUpdated: new Date() }; // Update timestamp only
+  });
+
+  ws.on('close', () => {
+    clients.delete(ws);
+    console.log('Client disconnected');
+  });
+});
+
+// Handle WebSocket messages
+async function handleWebSocketMessage(ws, data) {
+  switch (data.type) {
+    case 'hub_connect':
+      await handleHubConnection(ws, data);
+      break;
+    case 'device_data':
+      await handleDeviceData(ws, data);
+      break;
+    case 'get_connected_devices':
+      const connectedDevices = await getConnectedDevices();
+      ws.send(JSON.stringify({
+        type: 'connected_devices',
+        data: connectedDevices
+      }));
+      break;
+    default:
+      console.log('Unknown message type:', data.type);
   }
 }
 
-// Function to decode punch type
-function getPunchType(hand) {
-  const punchType = (hand >> 1) & 0x03;
-  return punchType === 0 ? 'Straight' : punchType === 1 ? 'Swing' : punchType === 2 ? 'Upcut' : 'Unknown';
-}
-
-// REST API to accept BLE data manually
-app.post("/api/sensor/ble", async (req, res) => {
+// Handle hub connection
+async function handleHubConnection(ws, data) {
   try {
-    const bleData = req.body;
-    sensorData = {
-      ...sensorData,
-      ...bleData,
-      lastUpdated: new Date().toISOString(),
-    };
-    await saveToDatabase();
-    io.emit("sensorData", sensorData);
-    res.status(200).send("Data received");
-  } catch (err) {
-    console.error("❌ Error processing BLE data:", err);
-    res.status(500).send("Server error");
+    const { hubId, deviceId, deviceType, name } = data;
+    
+    // Update or insert device in database
+    await pool.query(`
+      INSERT INTO devices (device_id, device_type, name, connected, last_seen)
+      VALUES ($1, $2, $3, true, CURRENT_TIMESTAMP)
+      ON CONFLICT (device_id) 
+      DO UPDATE SET 
+        connected = true,
+        last_seen = CURRENT_TIMESTAMP
+    `, [deviceId, deviceType, name]);
+
+    // Add to active devices
+    devices.set(deviceId, {
+      id: deviceId,
+      type: deviceType,
+      name: name,
+      connected: true,
+      hubId: hubId,
+      lastSeen: new Date()
+    });
+
+    broadcastDevices();
+  } catch (error) {
+    console.error('Error handling hub connection:', error);
+  }
+}
+
+// Handle device data
+async function handleDeviceData(ws, data) {
+  try {
+    const { deviceId, ...sensorData } = data;
+    
+    // Store data in database
+    await pool.query(`
+      INSERT INTO device_data (
+        device_id, heart_rate, cadence, power, speed, jumps, battery
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `, [
+      deviceId,
+      sensorData.heartRate || null,
+      sensorData.cadence || null,
+      sensorData.power || null,
+      sensorData.speed || null,
+      sensorData.jumps || null,
+      sensorData.battery || null
+    ]);
+
+    // Update device in memory
+    if (devices.has(deviceId)) {
+      const device = devices.get(deviceId);
+      device.data = sensorData;
+      device.lastSeen = new Date();
+      broadcastDevices();
+    }
+  } catch (error) {
+    console.error('Error handling device data:', error);
+  }
+}
+
+// Get connected devices from database
+async function getConnectedDevices() {
+  try {
+    const result = await pool.query(`
+      SELECT d.*, 
+        (SELECT json_agg(dd ORDER BY dd.timestamp DESC LIMIT 1)
+         FROM device_data dd
+         WHERE dd.device_id = d.device_id) as latest_data
+      FROM devices d
+      WHERE d.connected = true
+      AND d.last_seen > NOW() - INTERVAL '5 minutes'
+    `);
+    return result.rows;
+  } catch (error) {
+    console.error('Error getting connected devices:', error);
+    return [];
+  }
+}
+
+// Broadcast device updates to all connected clients
+function broadcastDevices() {
+  const message = JSON.stringify({
+    type: 'devices',
+    data: Array.from(devices.values())
+  });
+
+  clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+// REST API endpoints
+app.get('/api/devices', async (req, res) => {
+  try {
+    const devices = await getConnectedDevices();
+    res.json(devices);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch devices' });
   }
 });
 
-// Connect to Java microservice WebSocket
-const socket = new SockJS('https://hub990-server.onrender.com/'|| 'http://ec2-51-21-254-242.eu-north-1.compute.amazonaws.com/');
-const stompClient = new Client({
-  webSocketFactory: () => socket,
-  reconnectDelay: 5000,
-  debug: (str) => {
-    console.log('STOMP Debug:', str);
-  },
+app.get('/api/devices/:id/data', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { limit = 100 } = req.query;
+    
+    const result = await pool.query(`
+      SELECT * FROM device_data
+      WHERE device_id = $1
+      ORDER BY timestamp DESC
+      LIMIT $2
+    `, [id, limit]);
+    
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch device data' });
+  }
 });
 
-stompClient.onConnect = () => {
-  console.log('✅ Connected to Java microservice WebSocket');
-  stompClient.subscribe('/topic/hub900', async (message) => {
-    const { type, data } = JSON.parse(message.body);
-    updateSensorData(type, data);
-    await saveToDatabase();
-    io.emit('sensorData', sensorData);
-  });
-};
-
-stompClient.onStompError = (frame) => {
-  console.error('❌ STOMP Error:', frame);
-};
-
-stompClient.onWebSocketError = (error) => {
-  console.error('❌ WebSocket Error:', error);
-};
-
-stompClient.activate();
-
-// Socket.IO for real-time client updates
-io.on('connection', (socket) => {
-  console.log('⚡ Client connected via Socket.IO');
-  socket.emit('sensorData', sensorData);
-
-  socket.on('disconnect', () => {
-    console.log('⚡ Client disconnected');
-  });
-});
-
-// Start server after DB initialized
-const PORT = process.env.PORT||3000 ;
-console.log(PORT)
+// Start server
+const PORT = process.env.PORT || 9000;
 initializeDatabase().then(() => {
-server.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
-});
-
-});
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    // console.log(`Web interface available at http://localhost:${PORT}`);
+  });
+}); 

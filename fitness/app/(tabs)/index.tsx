@@ -8,20 +8,36 @@ import {
   Platform,
   ActivityIndicator,
   Alert,
+  ScrollView,
+  Linking,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useState, useEffect } from "react";
-import { BleManager, Device, Service, Characteristic } from "react-native-ble-plx";
+import { BleManager, Device, Characteristic, State } from "react-native-ble-plx";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Icon from "react-native-vector-icons/MaterialCommunityIcons";
 import Modal from "react-native-modal";
 import axios from "axios";
+import { useSocket } from "../../hooks/useSocket";
 
-// Backend API URL (replace with your ngrok or deployed URL)
-const API_URL = "https://node-serverv-1-0-1.onrender.com/api/sensor/ble";
+// Backend API URL
+const API_URL = Platform.select({
+  web: 'http://localhost:9000',
+  default: 'http://10.0.2.2:9000' // For Android emulator
+});
 
-// AsyncStorage key for last connected device
+const WS_URL = Platform.select({
+  web: 'ws://localhost:9000',
+  default: 'ws://10.0.2.2:9000' // For Android emulator
+});
+
+// CL900 Hub Service UUIDs
+const CL900_SERVICE_UUID = "0000FFE0-0000-1000-8000-00805F9B34FB";
+const CL900_CHARACTERISTIC_UUID = "0000FFE1-0000-1000-8000-00805F9B34FB";
+
+// AsyncStorage keys
 const LAST_DEVICE_KEY = "lastConnectedDevice";
+const HUB_ID_KEY = "lastConnectedHub";
 
 interface SensorData {
   heartRate: number | null;
@@ -39,14 +55,25 @@ interface SensorData {
   lastUpdated: string | null;
 }
 
-// Create a BLE manager instance
+interface ConnectedDevice {
+  id: string;
+  type: string;
+  name: string;
+  connected: boolean;
+  hubId: string;
+  lastSeen: Date;
+  data?: SensorData;
+}
+
+// Initialize BLE manager only on native platforms
 let bleManager: BleManager | null = null;
-try {
-  bleManager = new BleManager();
-  console.log("BleManager initialized successfully");
-} catch (error) {
-  console.error("Failed to initialize BleManager:", error);
-  Alert.alert("Initialization Error", "Failed to initialize Bluetooth. Please restart the app.");
+if (Platform.OS !== 'web') {
+  try {
+    bleManager = new BleManager();
+    console.log("BleManager initialized successfully");
+  } catch (error) {
+    console.error("Failed to initialize BleManager:", error);
+  }
 }
 
 export default function HomeScreen() {
@@ -57,6 +84,9 @@ export default function HomeScreen() {
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [autoConnecting, setAutoConnecting] = useState(false);
+  const [hubConnected, setHubConnected] = useState(false);
+  const [connectedDevices, setConnectedDevices] = useState<ConnectedDevice[]>([]);
+  const [connectionStatus, setConnectionStatus] = useState("Disconnected");
   const [data, setData] = useState<SensorData>({
     heartRate: null,
     boxingHand: null,
@@ -73,46 +103,91 @@ export default function HomeScreen() {
     lastUpdated: null,
   });
 
+  // Socket connection hook
+  const { isConnected: isSocketConnected, sensorData: socketData } = useSocket();
+
+  // Initialize WebSocket connection
+  useEffect(() => {
+    if (!WS_URL) {
+      console.error("WebSocket URL not configured for platform");
+      return;
+    }
+
+    const socket = new WebSocket(WS_URL);
+
+    socket.onopen = () => {
+      console.log("WebSocket connected to", WS_URL);
+      setConnectionStatus("Connected to server");
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === 'devices') {
+          setConnectedDevices(message.data);
+        }
+      } catch (error) {
+        console.error("Error parsing WebSocket message:", error);
+      }
+    };
+
+    socket.onerror = (error) => {
+      console.error("WebSocket error:", error);
+      setConnectionStatus("Server connection error");
+    };
+
+    socket.onclose = () => {
+      console.log("WebSocket disconnected");
+      setConnectionStatus("Disconnected from server");
+    };
+
+    return () => {
+      socket.close();
+    };
+  }, []);
+
   // Check Bluetooth status and attempt auto-connection
   useEffect(() => {
+    if (Platform.OS === 'web') {
+      setConnectionStatus("Bluetooth not available on web");
+      return;
+    }
+
     if (!bleManager) {
-      console.error("BleManager is not initialized");
-      Alert.alert("Error", "Bluetooth initialization failed. Please restart the app.");
+      setConnectionStatus("Bluetooth not initialized");
       return;
     }
 
     const checkBluetoothStatus = async () => {
       try {
-        const state = await bleManager!.state();
+        const state = await bleManager.state();
         console.log("Bluetooth state:", state);
         setIsBluetoothEnabled(state === "PoweredOn");
         if (state === "PoweredOn" && !connectedDevice && !autoConnecting) {
           console.log("Bluetooth enabled, attempting auto-connection...");
-          autoConnectToDevice();
+          autoConnectToHub();
         }
-      } catch (error) {
+      } catch (error: any) {
         console.error("Bluetooth status check error:", error);
-        Alert.alert("Error", "Failed to check Bluetooth status.");
+        setConnectionStatus("Bluetooth error: " + (error?.message || "Unknown error"));
       }
     };
 
     checkBluetoothStatus();
 
-    const subscription = bleManager!.onStateChange((state) => {
+    const subscription = bleManager.onStateChange((state) => {
       console.log("Bluetooth state changed:", state);
       setIsBluetoothEnabled(state === "PoweredOn");
       if (state === "PoweredOn" && !connectedDevice && !autoConnecting) {
         console.log("Bluetooth turned on, attempting auto-connection...");
-        autoConnectToDevice();
+        autoConnectToHub();
       } else if (state !== "PoweredOn") {
-        Alert.alert("Bluetooth Disabled", "Please enable Bluetooth in your device settings.");
+        setConnectionStatus("Bluetooth disabled");
       }
     }, true);
 
     return () => {
       subscription.remove();
-      
-      console.log("BleManager Cleanup");
     };
   }, [connectedDevice, autoConnecting]);
 
@@ -126,27 +201,115 @@ export default function HomeScreen() {
                 PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
                 PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
                 PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+                PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION,
               ]
-            : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
+            : [
+                PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+                PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION,
+              ];
 
         const granted = await PermissionsAndroid.requestMultiple(permissions);
-        const allGranted = permissions.every((perm) => granted[perm] === PermissionsAndroid.RESULTS.GRANTED);
+        const allGranted = Object.values(granted).every(
+          (result) => result === PermissionsAndroid.RESULTS.GRANTED
+        );
+        
         console.log("Permissions granted:", allGranted, granted);
+        
         if (!allGranted) {
-          Alert.alert("Permission Denied", "Bluetooth and location permissions are required to connect to devices.");
+          Alert.alert(
+            "Permission Required",
+            "Bluetooth and location permissions are required to connect to devices. Please enable them in your device settings.",
+            [
+              {
+                text: "Open Settings",
+                onPress: () => {
+                  if (Platform.OS === 'android') {
+                    Linking.openSettings();
+                  }
+                },
+              },
+              {
+                text: "Cancel",
+                style: "cancel",
+              },
+            ]
+          );
+          return false;
         }
-        return allGranted;
+        return true;
       } catch (error) {
         console.error("Permission request error:", error);
-        Alert.alert("Error", "Failed to request permissions.");
+        Alert.alert(
+          "Error",
+          "Failed to request permissions. Please enable Bluetooth and location permissions manually in your device settings.",
+          [
+            {
+              text: "Open Settings",
+              onPress: () => {
+                if (Platform.OS === 'android') {
+                  Linking.openSettings();
+                }
+              },
+            },
+            {
+              text: "Cancel",
+              style: "cancel",
+            },
+          ]
+        );
         return false;
       }
     }
     return true;
   };
 
-  // Auto-connect to a previously connected or discoverable device
-  const autoConnectToDevice = async () => {
+  // Enable Bluetooth
+  const enableBluetooth = async () => {
+    try {
+      if (!bleManager) {
+        throw new Error("Bluetooth manager not initialized");
+      }
+
+      const state = await bleManager.state();
+      if (state === "PoweredOff") {
+        Alert.alert(
+          "Bluetooth Required",
+          "Please enable Bluetooth to connect to devices.",
+          [
+            {
+              text: "Enable Bluetooth",
+              onPress: async () => {
+                try {
+                  if (Platform.OS === 'android') {
+                    await Linking.openSettings();
+                  } else {
+                    // On iOS, we can only direct to settings
+                    await Linking.openURL('app-settings:');
+                  }
+                } catch (error) {
+                  console.error("Failed to open Bluetooth settings:", error);
+                  Alert.alert("Error", "Failed to open Bluetooth settings. Please enable Bluetooth manually.");
+                }
+              },
+            },
+            {
+              text: "Cancel",
+              style: "cancel",
+            },
+          ]
+        );
+        return false;
+      }
+      return true;
+    } catch (error) {
+      console.error("Bluetooth enable error:", error);
+      Alert.alert("Error", "Failed to check Bluetooth status. Please ensure Bluetooth is enabled.");
+      return false;
+    }
+  };
+
+  // Auto-connect to CL900 hub
+  const autoConnectToHub = async () => {
     if (connectedDevice || autoConnecting || scanning) {
       console.log("Auto-connection skipped: already connected or in progress");
       return;
@@ -155,30 +318,29 @@ export default function HomeScreen() {
     try {
       setAutoConnecting(true);
       setModalVisible(true);
-      console.log("Starting auto-connection scan...");
+      console.log("Starting auto-connection scan for CL900 hub...");
 
       if (!bleManager) {
-        throw new Error("BleManager not initialized");
+        throw new Error("Bluetooth manager not initialized");
       }
 
+      // First check and request permissions
       const hasPermissions = await requestBluetoothPermissions();
       if (!hasPermissions) {
-        console.log("Auto-connection failed: permissions not granted");
         throw new Error("Bluetooth permissions not granted");
       }
 
-      const state = await bleManager.state();
-      console.log("Current Bluetooth state:", state);
-      if (state !== "PoweredOn") {
-        console.log("Auto-connection failed: Bluetooth not enabled");
+      // Then check and enable Bluetooth
+      const isBluetoothEnabled = await enableBluetooth();
+      if (!isBluetoothEnabled) {
         throw new Error("Bluetooth is not enabled");
       }
 
-      // Get last connected device ID
-      const lastDeviceId = await AsyncStorage.getItem(LAST_DEVICE_KEY);
-      console.log("Last connected device ID:", lastDeviceId);
+      // Get last connected hub ID
+      const lastHubId = await AsyncStorage.getItem(HUB_ID_KEY);
+      console.log("Last connected hub ID:", lastHubId);
 
-      let foundDevice: Device | null = null;
+      let foundHub: Device | null = null;
       const discoveredDevices = new Map<string, Device>();
 
       bleManager.startDeviceScan(null, null, (error, device) => {
@@ -186,181 +348,128 @@ export default function HomeScreen() {
           console.error("Auto-connection scan error:", error);
           setAutoConnecting(false);
           setModalVisible(false);
-          Alert.alert("Connection Error", `Failed to scan: ${error.message}`);
+          Alert.alert(
+            "Connection Error",
+            `Failed to scan: ${error.message}. Please ensure Bluetooth is enabled and try again.`
+          );
           return;
         }
 
-        if (device && device.name) {
-          console.log("Discovered device:", {
+        if (device && device.name && device.name.includes("CL900")) {
+          console.log("Discovered CL900 hub:", {
             id: device.id,
             name: device.name,
             rssi: device.rssi,
           });
           discoveredDevices.set(device.id, device);
 
-          // Prioritize last connected device or take first named device
-          if (!foundDevice && (device.id === lastDeviceId || !lastDeviceId)) {
-            foundDevice = device;
-            bleManager!.stopDeviceScan();
-            connectToDevice(device);
+          if (!foundHub && (device.id === lastHubId || !lastHubId)) {
+            foundHub = device;
+            bleManager.stopDeviceScan();
+            connectToHub(device);
           }
         }
       });
 
+      // Scan for 10 seconds
       setTimeout(() => {
-        bleManager!.stopDeviceScan();
+        bleManager.stopDeviceScan();
         setAutoConnecting(false);
         setModalVisible(false);
-        if (!foundDevice) {
-          console.log("Auto-connection failed: no devices found");
+        if (!foundHub) {
+          console.log("Auto-connection failed: no CL900 hub found");
           setDevices(Array.from(discoveredDevices.values()));
           Alert.alert(
-            "No Devices Found",
-            "Could not find a paired device. Ensure it is in range and discoverable, then try scanning manually."
+            "No CL900 Hub Found",
+            "Could not find a CL900 hub. Please ensure:\n\n" +
+            "1. The hub is powered on\n" +
+            "2. The hub is in range\n" +
+            "3. The hub is in pairing mode\n\n" +
+            "Try scanning again or check the hub's status.",
+            [
+              {
+                text: "Try Again",
+                onPress: autoConnectToHub,
+              },
+              {
+                text: "Cancel",
+                style: "cancel",
+              },
+            ]
           );
         }
-      }, 5000);
+      }, 10000);
     } catch (error) {
       console.error("Auto-connection error:", error);
-      Alert.alert("Error", `Failed to auto-connect: ${(error as Error).message}`);
+      Alert.alert(
+        "Connection Error",
+        `Failed to connect: ${(error as Error).message}. Please check your Bluetooth settings and try again.`
+      );
       setAutoConnecting(false);
       setModalVisible(false);
     }
   };
 
-  // Manual scan for BLE devices
-  const scanForDevices = async () => {
+  // Connect to CL900 hub
+  const connectToHub = async (device: Device) => {
     try {
-      console.log("Starting manual BLE scan...");
-      setScanning(true);
-      setModalVisible(true);
-      setDevices([]);
-
-      if (!bleManager) {
-        console.error("BleManager not initialized");
-        throw new Error("BleManager not initialized");
-      }
-
-      const hasPermissions = await requestBluetoothPermissions();
-      if (!hasPermissions) {
-        console.log("Manual scan failed: permissions not granted");
-        throw new Error("Bluetooth permissions not granted");
-      }
-
-      const state = await bleManager.state();
-      console.log("Current Bluetooth state:", state);
-      if (state !== "PoweredOn") {
-        console.log("Manual scan failed: Bluetooth not enabled");
-        throw new Error("Bluetooth is not enabled");
-      }
-
-      setIsBluetoothEnabled(true);
-
-      const discoveredDevices = new Map<string, Device>();
-      bleManager.startDeviceScan(null, null, (error, device) => {
-        if (error) {
-          console.error("Manual scan error:", error);
-          setScanning(false);
-          setModalVisible(false);
-          Alert.alert("Scan Error", `Failed to scan: ${error.message}`);
-          return;
-        }
-
-        if (device && device.name) {
-          console.log("Discovered device:", {
-            id: device.id,
-            name: device.name,
-            rssi: device.rssi,
-            isConnectable: device.isConnectable,
-          });
-          discoveredDevices.set(device.id, device);
-          setDevices(Array.from(discoveredDevices.values()));
-        }
-      });
-
-      setTimeout(() => {
-        console.log("Stopping manual BLE scan");
-        bleManager!.stopDeviceScan();
-        setScanning(false);
-        setModalVisible(false);
-        if (discoveredDevices.size === 0) {
-          Alert.alert("No Devices Found", "No Bluetooth devices were detected. Ensure devices are nearby and discoverable.");
-        }
-      }, 10000);
-    } catch (error) {
-      console.error("Manual scan error:", error);
-      Alert.alert("Error", `Failed to scan for devices: ${(error as Error).message}`);
-      setScanning(false);
-      setModalVisible(false);
-    }
-  };
-
-  // Connect to a device and discover services/characteristics
-  const connectToDevice = async (device: Device) => {
-    try {
-      console.log("Connecting to device:", device.name);
+      console.log("Connecting to CL900 hub:", device.name);
       setConnecting(true);
       setModalVisible(true);
 
       if (!bleManager) {
-        throw new Error("BleManager not initialized");
+        throw new Error("Bluetooth manager not initialized");
       }
 
       bleManager.stopDeviceScan();
       const connectedDevice = await device.connect();
       await connectedDevice.discoverAllServicesAndCharacteristics();
       setConnectedDevice(connectedDevice);
+      setHubConnected(true);
 
-      // Store device ID in AsyncStorage
-      await AsyncStorage.setItem(LAST_DEVICE_KEY, device.id);
-      console.log("Stored device ID:", device.id);
+      // Store hub ID in AsyncStorage
+      await AsyncStorage.setItem(HUB_ID_KEY, device.id);
+      console.log("Stored hub ID:", device.id);
 
-      console.log("Connected to device:", connectedDevice.name);
+      // Notify server about hub connection
+      await axios.post(`${API_URL}/api/sensor/ble`, {
+        type: "hub_connect",
+        hubId: device.id,
+        deviceId: device.id,
+        deviceType: "CL900",
+        name: device.name || "CL900 Hub",
+      });
 
-      // Discover all services and characteristics
-      const services = await connectedDevice.services();
-      for (const service of services) {
-        const characteristics = await service.characteristics();
-        console.log(`Service UUID: ${service.uuid}`);
-        characteristics.forEach((char) => {
-          console.log(
-            `  Characteristic UUID: ${char.uuid}, Notifiable: ${char.isNotifiable}, Readable: ${char.isReadable}`
-          );
-        });
-
-        // Monitor notifiable characteristics
-        for (const char of characteristics) {
-          if (char.isNotifiable) {
-            await connectedDevice.monitorCharacteristicForService(
-              service.uuid,
-              char.uuid,
-              (error, characteristic) => {
-                if (error) {
-                  console.error(`Monitor error for ${char.uuid}:`, error);
-                  return;
-                }
-                if (characteristic?.value) {
-                  const parsedData = parseCharacteristicData(service.uuid, char.uuid, characteristic);
-                  setData((prev) => ({
-                    ...prev,
-                    ...parsedData,
-                    lastUpdated: new Date().toISOString(),
-                  }));
-                  sendToBackend({
-                    ...parsedData,
-                    deviceId: device.id,
-                    deviceType: `ble_${service.uuid}_${char.uuid}`,
-                  });
-                }
-              }
-            );
+      // Monitor CL900 characteristic
+      await connectedDevice.monitorCharacteristicForService(
+        CL900_SERVICE_UUID,
+        CL900_CHARACTERISTIC_UUID,
+        (error, characteristic) => {
+          if (error) {
+            console.error("Monitor error:", error);
+            return;
+          }
+          if (characteristic?.value) {
+            const parsedData = parseCL900Data(characteristic.value);
+            setData(prev => ({
+              ...prev,
+              ...parsedData,
+              lastUpdated: new Date().toISOString(),
+            }));
+            sendToBackend({
+              ...parsedData,
+              deviceId: device.id,
+              deviceType: "CL900",
+            });
           }
         }
-      }
+      );
 
       connectedDevice.onDisconnected((error, device) => {
-        console.log("Disconnected from device:", device.name, error);
+        console.log("Disconnected from CL900 hub:", device.name, error);
         setConnectedDevice(null);
+        setHubConnected(false);
+        setConnectedDevices([]);
         setData({
           heartRate: null,
           boxingHand: null,
@@ -376,12 +485,13 @@ export default function HomeScreen() {
           oxygen: null,
           lastUpdated: null,
         });
-        Alert.alert("Disconnected", `Lost connection to ${device.name || "device"}.`);
+        Alert.alert("Disconnected", `Lost connection to ${device.name || "CL900 hub"}.`);
       });
     } catch (error) {
       console.error("Connection error:", error);
-      Alert.alert("Error", `Failed to connect to ${device.name || "device"}: ${(error as any).message}`);
+      Alert.alert("Error", `Failed to connect to CL900 hub: ${(error as any).message}`);
       setConnectedDevice(null);
+      setHubConnected(false);
     } finally {
       setConnecting(false);
       setAutoConnecting(false);
@@ -389,18 +499,27 @@ export default function HomeScreen() {
     }
   };
 
-  // Parse characteristic data (log raw data for Hub900 customization)
-  const parseCharacteristicData = (serviceUUID: string, charUUID: string, characteristic: Characteristic) => {
-    const rawData = Buffer.from(characteristic.value!, "base64");
-    console.log(`Characteristic ${charUUID} data for service ${serviceUUID}:`, rawData);
-    // Return empty object; customize parsing for Hub900 when SDK details are available
-    return {};
+  // Parse CL900 data
+  const parseCL900Data = (value: string) => {
+    try {
+      const buffer = Buffer.from(value, 'base64');
+      // Implement CL900 specific data parsing here
+      // This is a placeholder - you'll need to implement the actual parsing based on CL900 protocol
+      return {
+        heartRate: buffer[0] || null,
+        battery: buffer[1] || null,
+        // Add other data parsing as needed
+      };
+    } catch (error) {
+      console.error("Error parsing CL900 data:", error);
+      return {};
+    }
   };
 
   // Send data to backend
   const sendToBackend = async (data: Partial<SensorData> & { deviceId: string; deviceType: string }) => {
     try {
-      await axios.post(API_URL, {
+      await axios.post(`${API_URL}/api/sensor/ble`, {
         ...data,
         lastUpdated: new Date().toISOString(),
       });
@@ -410,12 +529,14 @@ export default function HomeScreen() {
     }
   };
 
-  // Disconnect from device
-  const disconnectFromDevice = async () => {
+  // Disconnect from hub
+  const disconnectFromHub = async () => {
     if (connectedDevice && bleManager) {
       try {
         await connectedDevice.cancelConnection();
         setConnectedDevice(null);
+        setHubConnected(false);
+        setConnectedDevices([]);
         setData({
           heartRate: null,
           boxingHand: null,
@@ -442,7 +563,7 @@ export default function HomeScreen() {
   const renderDeviceItem = ({ item }: { item: Device }) => (
     <TouchableOpacity
       style={styles.deviceItem}
-      onPress={() => connectToDevice(item)}
+      onPress={() => connectToHub(item)}
       disabled={connecting || autoConnecting || connectedDevice !== null}
     >
       <Text style={styles.deviceName}>{item.name || "Unknown Device"}</Text>
@@ -455,49 +576,116 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.content}>
+      <ScrollView style={styles.content}>
         <Text style={styles.title}>Home</Text>
         <Text style={styles.subtitle}>Welcome to the home screen</Text>
 
-        {connectedDevice ? (
+        {/* Connection Status */}
+        <View style={styles.connectionStatus}>
+          <Text style={styles.statusText}>
+            Server Connection: {isSocketConnected ? "Connected" : "Disconnected"}
+          </Text>
+          {Platform.OS !== 'web' && (
+            <Text style={styles.statusText}>
+              Hub Connection: {hubConnected ? "Connected" : "Disconnected"}
+            </Text>
+          )}
+          {isSocketConnected && socketData && (
+            <Text style={styles.statusText}>
+              Last Update: {socketData.lastUpdated ? new Date(socketData.lastUpdated).toLocaleTimeString() : "N/A"}
+            </Text>
+          )}
+        </View>
+
+        {/* Hub Connection Section */}
+        {Platform.OS === 'web' ? (
+          <View style={styles.connectionStatus}>
+            <Text style={styles.statusText}>
+              Bluetooth is not available on web platform
+            </Text>
+          </View>
+        ) : connectedDevice ? (
           <View style={styles.connectedContainer}>
-            <Text style={styles.connectedText}>Connected to: {connectedDevice.name || "Device"}</Text>
-            <TouchableOpacity style={styles.disconnectButton} onPress={disconnectFromDevice}>
+            <Text style={styles.connectedText}>Connected to: {connectedDevice.name || "CL900 Hub"}</Text>
+            <TouchableOpacity style={styles.disconnectButton} onPress={disconnectFromHub}>
               <Text style={styles.buttonText}>Disconnect</Text>
             </TouchableOpacity>
-            <View style={styles.dataContainer}>
-              <Text style={styles.dataText}>Heart Rate: {data.heartRate || "N/A"} bpm</Text>
-              <Text style={styles.dataText}>Boxing Hand: {data.boxingHand || "N/A"}</Text>
-              <Text style={styles.dataText}>Punch Type: {data.boxingPunchType || "N/A"}</Text>
-              <Text style={styles.dataText}>Boxing Power: {data.boxingPower || "N/A"} kg</Text>
-              <Text style={styles.dataText}>Boxing Speed: {data.boxingSpeed || "N/A"} m/s</Text>
-              <Text style={styles.dataText}>Cadence: {data.cadenceWheel || "N/A"} laps</Text>
-              <Text style={styles.dataText}>SOS Alert: {data.sosAlert ? "Active" : "Inactive"}</Text>
-              <Text style={styles.dataText}>Battery: {data.battery || "N/A"}%</Text>
-              <Text style={styles.dataText}>Steps: {data.steps || "N/A"}</Text>
-              <Text style={styles.dataText}>Calories: {data.calories || "N/A"} kcal</Text>
-              <Text style={styles.dataText}>Temperature: {data.temperature || "N/A"}°C</Text>
-              <Text style={styles.dataText}>Oxygen: {data.oxygen || "N/A"}%</Text>
-            </View>
           </View>
         ) : (
           <View>
             <Text style={styles.statusText}>
-              {autoConnecting ? "Connecting to paired device..." : "No device connected"}
+              {autoConnecting ? "Connecting to CL900 hub..." : "No hub connected"}
             </Text>
             <TouchableOpacity
               style={[styles.button, (scanning || connecting || autoConnecting) && styles.buttonDisabled]}
-              onPress={scanForDevices}
+              onPress={autoConnectToHub}
               disabled={scanning || connecting || autoConnecting}
             >
               <Icon name="bluetooth" size={24} color="white" style={styles.buttonIcon} />
               <Text style={styles.buttonText}>
-                {scanning ? "Scanning..." : connecting || autoConnecting ? "Connecting..." : "Scan for Bluetooth Devices"}
+                {scanning ? "Scanning..." : connecting || autoConnecting ? "Connecting..." : "Connect to CL900 Hub"}
               </Text>
             </TouchableOpacity>
           </View>
         )}
 
+        {/* Connected Devices List */}
+        {hubConnected && connectedDevices.length > 0 && (
+          <View style={styles.dataContainer}>
+            <Text style={styles.dataTitle}>Connected Devices</Text>
+            {connectedDevices.map((device) => (
+              <View key={device.id} style={styles.deviceDataContainer}>
+                <Text style={styles.deviceName}>{device.name}</Text>
+                <Text style={styles.deviceType}>Type: {device.type}</Text>
+                <Text style={styles.deviceStatus}>
+                  Last Seen: {new Date(device.lastSeen).toLocaleTimeString()}
+                </Text>
+                {device.data && (
+                  <View style={styles.deviceData}>
+                    <Text style={styles.dataText}>Heart Rate: {device.data.heartRate || "N/A"} bpm</Text>
+                    <Text style={styles.dataText}>Battery: {device.data.battery || "N/A"}%</Text>
+                    {device.data.boxingHand && (
+                      <Text style={styles.dataText}>Boxing Hand: {device.data.boxingHand}</Text>
+                    )}
+                    {device.data.boxingPunchType && (
+                      <Text style={styles.dataText}>Punch Type: {device.data.boxingPunchType}</Text>
+                    )}
+                    {device.data.boxingPower && (
+                      <Text style={styles.dataText}>Power: {device.data.boxingPower} kg</Text>
+                    )}
+                    {device.data.boxingSpeed && (
+                      <Text style={styles.dataText}>Speed: {device.data.boxingSpeed} m/s</Text>
+                    )}
+                    {device.data.cadenceWheel && (
+                      <Text style={styles.dataText}>Cadence: {device.data.cadenceWheel} laps</Text>
+                    )}
+                  </View>
+                )}
+              </View>
+            ))}
+          </View>
+        )}
+
+        {/* Hub Sensor Data Display */}
+        {hubConnected && (
+          <View style={styles.dataContainer}>
+            <Text style={styles.dataTitle}>Hub Sensor Data</Text>
+            <Text style={styles.dataText}>Heart Rate: {data.heartRate || "N/A"} bpm</Text>
+            <Text style={styles.dataText}>Boxing Hand: {data.boxingHand || "N/A"}</Text>
+            <Text style={styles.dataText}>Punch Type: {data.boxingPunchType || "N/A"}</Text>
+            <Text style={styles.dataText}>Boxing Power: {data.boxingPower || "N/A"} kg</Text>
+            <Text style={styles.dataText}>Boxing Speed: {data.boxingSpeed || "N/A"} m/s</Text>
+            <Text style={styles.dataText}>Cadence: {data.cadenceWheel || "N/A"} laps</Text>
+            <Text style={styles.dataText}>SOS Alert: {data.sosAlert ? "Active" : "Inactive"}</Text>
+            <Text style={styles.dataText}>Battery: {data.battery || "N/A"}%</Text>
+            <Text style={styles.dataText}>Steps: {data.steps || "N/A"}</Text>
+            <Text style={styles.dataText}>Calories: {data.calories || "N/A"} kcal</Text>
+            <Text style={styles.dataText}>Temperature: {data.temperature || "N/A"}°C</Text>
+            <Text style={styles.dataText}>Oxygen: {data.oxygen || "N/A"}%</Text>
+          </View>
+        )}
+
+        {/* Device List */}
         {devices.length > 0 && !connectedDevice && (
           <FlatList
             data={devices}
@@ -507,15 +695,16 @@ export default function HomeScreen() {
           />
         )}
 
+        {/* Loading Modal */}
         <Modal isVisible={modalVisible} style={styles.modal}>
           <View style={styles.modalContent}>
             <ActivityIndicator size="large" color="#1E88E5" />
             <Text style={styles.modalText}>
-              {scanning ? "Scanning for Bluetooth Devices..." : "Connecting to Device..."}
+              {scanning ? "Scanning for CL900 Hub..." : "Connecting to Hub..."}
             </Text>
           </View>
         </Modal>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -539,6 +728,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: "#BBBBBB",
     textAlign: "center",
+    marginBottom: 20,
+  },
+  connectionStatus: {
+    backgroundColor: "#1E1E1E",
+    padding: 15,
+    borderRadius: 8,
     marginBottom: 20,
   },
   statusText: {
@@ -630,9 +825,32 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     width: "100%",
   },
+  dataTitle: {
+    color: "white",
+    fontSize: 20,
+    fontWeight: "bold",
+    marginBottom: 15,
+  },
   dataText: {
     color: "white",
     fontSize: 16,
     marginVertical: 5,
+  },
+  deviceDataContainer: {
+    backgroundColor: "#2A2A2A",
+    padding: 15,
+    borderRadius: 8,
+    marginVertical: 8,
+  },
+  deviceData: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#3A3A3A",
+  },
+  deviceType: {
+    color: "#BBBBBB",
+    fontSize: 14,
+    marginTop: 5,
   },
 });
