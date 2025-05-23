@@ -10,5 +10,5 @@ RUN apt-get update && apt-get install -y \
 RUN npm install
 COPY . .
 
-EXPOSE 3000
+EXPOSE 5000
 CMD ["node","server.js"]

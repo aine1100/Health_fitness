@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { useSocket } from "../../hooks/useSocket";
 
 // Backend API URL
-const API_URL = "http://localhost:9000";
+const API_URL = "http://13.51.250.12:5000";
 
 interface DeviceData {
   deviceId: string;
@@ -34,18 +34,28 @@ interface DeviceData {
 export default function ProfileScreen() {
   const [selectedDevice, setSelectedDevice] = useState<DeviceData | null>(null);
   const [devices, setDevices] = useState<DeviceData[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const { isConnected: isSocketConnected } = useSocket();
 
   // Fetch connected devices
   const fetchDevices = async () => {
     try {
+      console.log('Fetching devices from:', `${API_URL}/api/devices`);
       const response = await axios.get(`${API_URL}/api/devices`);
-      setDevices(response.data);
-      if (response.data.length > 0 && !selectedDevice) {
-        setSelectedDevice(response.data[0]);
+      console.log('Devices response:', response.data);
+      
+      if (response.data && Array.isArray(response.data)) {
+        setDevices(response.data);
+        if (response.data.length > 0 && !selectedDevice) {
+          setSelectedDevice(response.data[0]);
+        }
+      } else {
+        console.error('Invalid response format:', response.data);
+        setError('Invalid response format from server');
       }
     } catch (error) {
       console.error("Error fetching devices:", error);
+      setError('Failed to fetch devices');
     }
   };
 
@@ -59,10 +69,13 @@ export default function ProfileScreen() {
   // Fetch historical data for selected device
   const fetchDeviceData = async (deviceId: string) => {
     try {
+      console.log('Fetching data for device:', deviceId);
       const response = await axios.get(`${API_URL}/api/devices/${deviceId}/data?limit=100`);
+      console.log('Device data response:', response.data);
       return response.data;
     } catch (error) {
       console.error("Error fetching device data:", error);
+      setError('Failed to fetch device data');
       return [];
     }
   };
@@ -85,6 +98,11 @@ export default function ProfileScreen() {
           <Text style={styles.statusText}>
             Server Connection: {isSocketConnected ? "Connected" : "Disconnected"}
           </Text>
+          {error && (
+            <Text style={[styles.statusText, { color: '#FF4A55' }]}>
+              Error: {error}
+            </Text>
+          )}
         </View>
 
         {/* Device Selection */}

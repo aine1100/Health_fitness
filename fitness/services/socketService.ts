@@ -23,9 +23,9 @@ export interface SensorData {
 class SocketService {
   private socket: Socket | null = null;
   private serverUrl: string = Platform.select({
-    ios: 'http://localhost:3000',
-    android: 'http://10.0.2.2:3000', // Android emulator localhost
-    default: 'http://localhost:3000',
+    ios: 'http://fitnessserver2-production.up.railway.app',
+    android: 'http://fitnessserver2-production.up.railway.app', // Android emulator localhost
+    default: 'http://fitnessserver2-production.up.railway.app',
   });
 
   // Callbacks for data updates
